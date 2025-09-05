@@ -311,3 +311,106 @@
     (asserts! (>= (stx-get-balance tx-sender) sale-price)
       ERR_INSUFFICIENT_BALANCE
     )
+
+    ;; Execute payment transfers
+    (try! (stx-transfer? seller-proceeds tx-sender seller))
+    (try! (stx-transfer? protocol-fee tx-sender (as-contract tx-sender)))
+
+    ;; Transfer artwork ownership
+    (try! (transfer-artwork token-id tx-sender))
+
+    ;; Deactivate listing
+    (map-set active-listings { token-id: token-id }
+      (merge listing-data { is-active: false })
+    )
+
+    ;; Update protocol treasury
+    (var-set protocol-treasury (+ (var-get protocol-treasury) protocol-fee))
+
+    ;; Update trading statistics
+    (update-user-statistics seller u0 u0 sale-price u0)
+    (update-user-statistics tx-sender u0 u0 sale-price u0)
+
+    (ok true)
+  )
+)
+
+;; Cancel active marketplace listing
+(define-public (cancel-listing (token-id uint))
+  (let ((listing-data (unwrap! (map-get? active-listings { token-id: token-id })
+      ERR_LISTING_NOT_FOUND
+    )))
+    ;; Validate cancellation authorization
+    (asserts! (is-eq tx-sender (get seller listing-data)) ERR_UNAUTHORIZED)
+    (asserts! (get is-active listing-data) ERR_MARKETPLACE_INACTIVE)
+
+    ;; Deactivate listing
+    (map-set active-listings { token-id: token-id }
+      (merge listing-data { is-active: false })
+    )
+
+    (ok true)
+  )
+)
+
+;; FRACTIONAL OWNERSHIP SYSTE
+
+;; Transfer fractional shares between users
+(define-public (transfer-fractional-shares
+    (token-id uint)
+    (recipient principal)
+    (share-amount uint)
+  )
+  (let (
+      (sender-position (unwrap!
+        (map-get? fractional-shares {
+          token-id: token-id,
+          shareholder: tx-sender,
+        })
+        ERR_INSUFFICIENT_BALANCE
+      ))
+      (recipient-position (default-to {
+        share-count: u0,
+        acquisition-timestamp: stacks-block-height,
+      }
+        (map-get? fractional-shares {
+          token-id: token-id,
+          shareholder: recipient,
+        })
+      ))
+      (new-recipient-shares (try! (safe-add (get share-count recipient-position) share-amount)))
+      (remaining-sender-shares (- (get share-count sender-position) share-amount))
+    )
+    ;; Validate transfer conditions
+    (asserts! (is-valid-recipient recipient) ERR_INVALID_RECIPIENT)
+    (asserts! (> share-amount u0) ERR_INVALID_PERCENTAGE)
+    (asserts! (>= (get share-count sender-position) share-amount)
+      ERR_INSUFFICIENT_BALANCE
+    )
+
+    ;; Update sender's position
+    (if (is-eq remaining-sender-shares u0)
+      (map-delete fractional-shares {
+        token-id: token-id,
+        shareholder: tx-sender,
+      })
+      (map-set fractional-shares {
+        token-id: token-id,
+        shareholder: tx-sender,
+      }
+        (merge sender-position { share-count: remaining-sender-shares })
+      )
+    )
+
+    ;; Update recipient's position
+    (map-set fractional-shares {
+      token-id: token-id,
+      shareholder: recipient,
+    } {
+      share-count: new-recipient-shares,
+      acquisition-timestamp: stacks-block-height,
+    })
+
+    (ok true)
+  )
+)
