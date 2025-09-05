@@ -414,3 +414,100 @@
     (ok true)
   )
 )
+
+;; STAKING & YIELD SYSTE
+
+;; Stake NFT to earn yield rewards
+(define-public (initiate-staking (token-id uint))
+  (let ((artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Validate staking eligibility
+    (asserts! (is-eq tx-sender (get owner artwork-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked artwork-data)) ERR_ALREADY_STAKED)
+
+    ;; Initialize staking position
+    (map-set nft-registry { token-id: token-id }
+      (merge artwork-data {
+        is-actively-staked: true,
+        stake-initiated-block: stacks-block-height,
+      })
+    )
+
+    (map-set staking-positions { token-id: token-id } {
+      accumulated-rewards: u0,
+      last-reward-claim: stacks-block-height,
+      total-blocks-staked: u0,
+    })
+
+    ;; Update global staking statistics
+    (var-set total-staked-tokens (+ (var-get total-staked-tokens) u1))
+
+    (ok true)
+  )
+)
+
+;; Claim accumulated staking rewards
+(define-public (claim-staking-rewards (token-id uint))
+  (let (
+      (artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (staking-data (unwrap! (map-get? staking-positions { token-id: token-id }) ERR_NOT_STAKED))
+      (pending-rewards (try! (calculate-pending-rewards token-id)))
+    )
+    ;; Validate claim conditions
+    (asserts! (is-eq tx-sender (get owner artwork-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (get is-actively-staked artwork-data) ERR_NOT_STAKED)
+    (asserts! (> pending-rewards u0) ERR_INSUFFICIENT_BALANCE)
+
+    ;; Transfer rewards to staker
+    (try! (as-contract (stx-transfer? pending-rewards (as-contract tx-sender) tx-sender)))
+
+    ;; Reset staking position
+    (map-set staking-positions { token-id: token-id }
+      (merge staking-data {
+        accumulated-rewards: u0,
+        last-reward-claim: stacks-block-height,
+      })
+    )
+
+    ;; Update user statistics
+    (update-user-statistics tx-sender u0 u0 u0 pending-rewards)
+
+    (ok pending-rewards)
+  )
+)
+
+;; Unstake NFT and claim final rewards
+(define-public (terminate-staking (token-id uint))
+  (let ((artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Validate token exists and unstaking authorization
+    (asserts! (> token-id u0) ERR_INVALID_TOKEN)
+    (asserts! (<= token-id (var-get total-supply)) ERR_INVALID_TOKEN)
+    (asserts! (is-eq tx-sender (get owner artwork-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (get is-actively-staked artwork-data) ERR_NOT_STAKED)
+
+    ;; Claim any pending rewards
+    (try! (claim-staking-rewards token-id))
+
+    ;; Terminate staking position
+    (map-set nft-registry { token-id: token-id }
+      (merge artwork-data {
+        is-actively-staked: false,
+        stake-initiated-block: u0,
+      })
+    )
+
+    ;; Update global statistics
+    (var-set total-staked-tokens (- (var-get total-staked-tokens) u1))
+
+    (ok true)
+  )
+)
+
+;; QUERY FUNCTIONS (READ-ONLY
+
+(define-read-only (get-artwork-details (token-id uint))
+  (map-get? nft-registry { token-id: token-id })
+)
+
+(define-read-only (get-marketplace-listing (token-id uint))
+  (map-get? active-listings { token-id: token-id })
+)
