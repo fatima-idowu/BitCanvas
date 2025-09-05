@@ -205,3 +205,109 @@
       share-count: u1000000,
       acquisition-timestamp: stacks-block-height,
     })
+
+    ;; Update global state
+    (var-set total-supply new-token-id)
+
+    ;; Update creator statistics
+    (update-user-statistics tx-sender u1 u1 u0 u0)
+
+    (ok new-token-id)
+  )
+)
+
+;; Transfer NFT ownership (only if not staked)
+(define-public (transfer-artwork
+    (token-id uint)
+    (recipient principal)
+  )
+  (let (
+      (artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (sender-shares (unwrap!
+        (map-get? fractional-shares {
+          token-id: token-id,
+          shareholder: tx-sender,
+        })
+        ERR_NOT_TOKEN_OWNER
+      ))
+    )
+    ;; Validate transfer conditions
+    (asserts! (is-valid-recipient recipient) ERR_INVALID_RECIPIENT)
+    (asserts! (is-eq tx-sender (get owner artwork-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked artwork-data)) ERR_ALREADY_STAKED)
+    (asserts! (is-eq (get share-count sender-shares) u1000000)
+      ERR_NOT_TOKEN_OWNER
+    )
+    ;; Must own 100%
+
+    ;; Execute ownership transfer
+    (map-set nft-registry { token-id: token-id }
+      (merge artwork-data { owner: recipient })
+    )
+
+    ;; Transfer fractional shares
+    (map-delete fractional-shares {
+      token-id: token-id,
+      shareholder: tx-sender,
+    })
+    (map-set fractional-shares {
+      token-id: token-id,
+      shareholder: recipient,
+    } {
+      share-count: u1000000,
+      acquisition-timestamp: stacks-block-height,
+    })
+
+    ;; Update user statistics
+    (update-user-statistics tx-sender u0 u0 u0 u0)
+    ;; Decrease owned count
+    (update-user-statistics recipient u0 u1 u0 u0)
+    ;; Increase owned count
+
+    (ok true)
+  )
+)
+
+;; MARKETPLACE FUNCTIONALIT
+
+;; List NFT for sale on the marketplace
+(define-public (create-listing
+    (token-id uint)
+    (asking-price uint)
+  )
+  (let ((artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN)))
+    ;; Validate listing conditions
+    (asserts! (> asking-price u0) ERR_INVALID_PRICE)
+    (asserts! (is-eq tx-sender (get owner artwork-data)) ERR_NOT_TOKEN_OWNER)
+    (asserts! (not (get is-actively-staked artwork-data)) ERR_ALREADY_STAKED)
+
+    ;; Create marketplace listing
+    (map-set active-listings { token-id: token-id } {
+      asking-price: asking-price,
+      seller: tx-sender,
+      is-active: true,
+      listing-timestamp: stacks-block-height,
+    })
+
+    (ok true)
+  )
+)
+
+;; Execute NFT purchase from marketplace
+(define-public (execute-purchase (token-id uint))
+  (let (
+      (listing-data (unwrap! (map-get? active-listings { token-id: token-id })
+        ERR_LISTING_NOT_FOUND
+      ))
+      (artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (sale-price (get asking-price listing-data))
+      (seller (get seller listing-data))
+      (protocol-fee (try! (calculate-protocol-fee sale-price)))
+      (seller-proceeds (- sale-price protocol-fee))
+    )
+    ;; Validate purchase conditions
+    (asserts! (get is-active listing-data) ERR_MARKETPLACE_INACTIVE)
+    (asserts! (not (is-eq tx-sender seller)) ERR_SELF_TRANSFER)
+    (asserts! (>= (stx-get-balance tx-sender) sale-price)
+      ERR_INSUFFICIENT_BALANCE
+    )
