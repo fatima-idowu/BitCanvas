@@ -101,3 +101,107 @@
     total-blocks-staked: uint,
   }
 )
+
+;; User Activity Tracking
+(define-map user-statistics
+  { user: principal }
+  {
+    tokens-created: uint,
+    tokens-owned: uint,
+    total-volume-traded: uint,
+    rewards-earned: uint,
+  }
+)
+
+;; PRIVATE UTILITY FUNCTION
+
+;; Safe arithmetic operations to prevent overflow
+(define-private (safe-add
+    (a uint)
+    (b uint)
+  )
+  (let ((result (+ a b)))
+    (asserts! (>= result a) ERR_ARITHMETIC_OVERFLOW)
+    (ok result)
+  )
+)
+
+(define-private (safe-multiply
+    (a uint)
+    (b uint)
+  )
+  (let ((result (* a b)))
+    (asserts! (or (is-eq a u0) (is-eq result (/ result a)))
+      ERR_ARITHMETIC_OVERFLOW
+    )
+    (ok result)
+  )
+)
+
+;; Input validation functions
+(define-private (is-valid-uri (uri (string-ascii 256)))
+  (let ((uri-length (len uri)))
+    (and
+      (> uri-length u0)
+      (<= uri-length MAX_URI_LENGTH)
+      (not (is-eq uri ""))
+    )
+  )
+)
+
+(define-private (is-valid-recipient (recipient principal))
+  (and
+    (not (is-eq recipient (as-contract tx-sender)))
+    (not (is-eq recipient tx-sender))
+  )
+)
+
+;; Fixed calculate-protocol-fee function
+(define-private (calculate-protocol-fee (amount uint))
+  (ok (/ (try! (safe-multiply amount (var-get current-protocol-fee)))
+         BASIS_POINTS_SCALE))
+)
+
+;; CORE NFT FUNCTIONALIT
+
+;; Mint new NFT with Bitcoin collateral backing
+(define-public (mint-artwork
+    (metadata-uri (string-ascii 256))
+    (bitcoin-collateral uint)
+  )
+  (let (
+      (new-token-id (+ (var-get total-supply) u1))
+      (required-collateral (/
+        (try! (safe-multiply bitcoin-collateral (var-get min-collateral-requirement)))
+        u100
+      ))
+      (creator-balance (stx-get-balance tx-sender))
+    )
+    ;; Comprehensive input validation
+    (asserts! (is-valid-uri metadata-uri) ERR_INVALID_URI)
+    (asserts! (> bitcoin-collateral u0) ERR_INSUFFICIENT_COLLATERAL)
+    (asserts! (>= creator-balance required-collateral) ERR_INSUFFICIENT_BALANCE)
+
+    ;; Secure collateral transfer to contract
+    (try! (stx-transfer? required-collateral tx-sender (as-contract tx-sender)))
+
+    ;; Register new NFT in registry
+    (map-set nft-registry { token-id: new-token-id } {
+      owner: tx-sender,
+      creator: tx-sender,
+      metadata-uri: metadata-uri,
+      bitcoin-collateral: bitcoin-collateral,
+      is-actively-staked: false,
+      stake-initiated-block: u0,
+      total-fractional-shares: u1000000, ;; 1M shares for precision
+      creation-timestamp: stacks-block-height,
+    })
+
+    ;; Initialize creator's full ownership
+    (map-set fractional-shares {
+      token-id: new-token-id,
+      shareholder: tx-sender,
+    } {
+      share-count: u1000000,
+      acquisition-timestamp: stacks-block-height,
+    })
