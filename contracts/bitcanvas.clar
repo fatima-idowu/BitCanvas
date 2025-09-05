@@ -511,3 +511,100 @@
 (define-read-only (get-marketplace-listing (token-id uint))
   (map-get? active-listings { token-id: token-id })
 )
+
+(define-read-only (get-fractional-position
+    (token-id uint)
+    (shareholder principal)
+  )
+  (map-get? fractional-shares {
+    token-id: token-id,
+    shareholder: shareholder,
+  })
+)
+
+(define-read-only (get-staking-position (token-id uint))
+  (map-get? staking-positions { token-id: token-id })
+)
+
+(define-read-only (get-user-profile (user principal))
+  (map-get? user-statistics { user: user })
+)
+
+(define-read-only (get-protocol-metrics)
+  {
+    total-supply: (var-get total-supply),
+    total-staked: (var-get total-staked-tokens),
+    protocol-treasury: (var-get protocol-treasury),
+    current-yield-rate: (var-get current-yield-rate),
+    protocol-fee: (var-get current-protocol-fee),
+  }
+)
+
+;; Calculate pending staking rewards for a token
+(define-read-only (calculate-pending-rewards (token-id uint))
+  (let (
+      (artwork-data (unwrap! (map-get? nft-registry { token-id: token-id }) ERR_INVALID_TOKEN))
+      (staking-data (unwrap! (map-get? staking-positions { token-id: token-id }) ERR_NOT_STAKED))
+      (blocks-since-last-claim (- stacks-block-height (get last-reward-claim staking-data)))
+      (annual-yield-rate (var-get current-yield-rate))
+      (collateral-value (get bitcoin-collateral artwork-data))
+      (yield-per-block (/ annual-yield-rate BLOCKS_PER_YEAR))
+      (new-rewards (/
+        (try! (safe-multiply collateral-value
+          (try! (safe-multiply blocks-since-last-claim yield-per-block))
+        ))
+        BASIS_POINTS_SCALE
+      ))
+    )
+    (asserts! (get is-actively-staked artwork-data) ERR_NOT_STAKED)
+    (ok (+ (get accumulated-rewards staking-data) new-rewards))
+  )
+)
+
+;; ADMINISTRATIVE FUNCTION
+
+;; Update protocol parameters (owner only)
+(define-public (update-protocol-parameters
+    (new-yield-rate uint)
+    (new-fee-rate uint)
+    (new-collateral-ratio uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (asserts! (<= new-yield-rate u2000) ERR_INVALID_PERCENTAGE) ;; Max 20% yield
+    (asserts! (<= new-fee-rate u500) ERR_INVALID_PERCENTAGE) ;; Max 5% fee
+    (asserts! (>= new-collateral-ratio u100) ERR_INVALID_PERCENTAGE) ;; Min 100% collateral
+
+    (var-set current-yield-rate new-yield-rate)
+    (var-set current-protocol-fee new-fee-rate)
+    (var-set min-collateral-requirement new-collateral-ratio)
+
+    (ok true)
+  )
+)
+
+;; PRIVATE HELPER FUNCTION
+
+(define-private (update-user-statistics
+    (user principal)
+    (created-delta uint)
+    (owned-delta uint)
+    (volume-delta uint)
+    (rewards-delta uint)
+  )
+  (let ((current-stats (default-to {
+      tokens-created: u0,
+      tokens-owned: u0,
+      total-volume-traded: u0,
+      rewards-earned: u0,
+    }
+      (map-get? user-statistics { user: user })
+    )))
+    (map-set user-statistics { user: user } {
+      tokens-created: (+ (get tokens-created current-stats) created-delta),
+      tokens-owned: (+ (get tokens-owned current-stats) owned-delta),
+      total-volume-traded: (+ (get total-volume-traded current-stats) volume-delta),
+      rewards-earned: (+ (get rewards-earned current-stats) rewards-delta),
+    })
+  )
+)
